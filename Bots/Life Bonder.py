@@ -88,15 +88,29 @@ def calculate_position_behind_player(distance):
 
 
 def check_bond_on_player(skill_name):
-    """Check if a specific bond is active on the player."""
+    """Check if a specific bond is active on the player using BuffExists/EffectExists."""
     try:
         player_id = GLOBAL_CACHE.Player.GetAgentID()
         skill_id = GLOBAL_CACHE.Skill.GetID(skill_name)
         if skill_id == 0:
-            return True  # If skill not found, assume it's active
-        return Effects.HasEffect(player_id, skill_id)
+            return False  # If skill not found, assume it's not active
+        # Check both buffs and effects
+        return (GLOBAL_CACHE.Effects.BuffExists(player_id, skill_id) or
+                GLOBAL_CACHE.Effects.EffectExists(player_id, skill_id))
     except:
-        return True
+        return False
+
+
+def get_hero_energy_points(hero_id):
+    """Get the hero's current energy in actual points (not percentage)."""
+    try:
+        energy_pct = GLOBAL_CACHE.Agent.GetEnergy(hero_id)
+        max_energy = GLOBAL_CACHE.Agent.GetMaxEnergy(hero_id)
+        if energy_pct is not None and max_energy is not None:
+            return int(energy_pct * max_energy)
+    except:
+        pass
+    return 0
 
 
 def get_next_missing_bond():
@@ -135,7 +149,7 @@ def update_hero_flag():
 
 
 def maintain_bonds():
-    """Cycle through bonds and cast them on the player."""
+    """Cycle through bonds and cast them on the player - skip if already active."""
     global bond_timer, hero_index, current_bond_index, bond_skills, next_cast_time
 
     # Check if we're still waiting for the previous cast to finish
@@ -145,19 +159,23 @@ def maintain_bonds():
 
     hero_id = get_hero_agent_id()
     if hero_id == 0:
-        Py4GW.Console.Log("Life Bonder", "No hero found", Py4GW.Console.MessageType.Warning)
         return
 
     # Check if hero is alive
     if not GLOBAL_CACHE.Agent.IsLiving(hero_id):
         return
 
+    # Check hero energy - don't cast bonds if below 20 energy
+    hero_energy = get_hero_energy_points(hero_id)
+    if hero_energy < 20:
+        return  # Let use_blessed_signet handle energy recovery
+
     # Get player (target for bonds)
     player_id = GLOBAL_CACHE.Player.GetAgentID()
     if player_id == 0:
         return
 
-    # Find the next enabled bond to cast
+    # Find the next enabled bond that's NOT already on the player
     attempts = 0
     while attempts < len(bond_skills):
         bond = bond_skills[current_bond_index]
@@ -166,6 +184,11 @@ def maintain_bonds():
         current_bond_index = (current_bond_index + 1) % len(bond_skills)
 
         if bond["enabled"]:
+            # Check if this bond is already active on the player
+            if check_bond_on_player(bond["name"]):
+                attempts += 1
+                continue  # Skip - already has this bond
+
             # HeroUseSkill uses 1-indexed hero numbers (1-7)
             hero_number = hero_index + 1
             skill_slot = bond["slot"]
@@ -184,27 +207,25 @@ def maintain_bonds():
 
 
 def use_blessed_signet():
-    """Use Blessed Signet for energy management."""
+    """Use Blessed Signet for energy management when below 20 energy."""
     global signet_timer, hero_index, next_cast_time
-
-    if not signet_timer.HasElapsed(SIGNET_DELAY):
-        return
 
     # Check if we're still waiting for a cast to finish
     current_time = int(time.time() * 1000)
     if current_time < next_cast_time:
-        return
+        return False  # Return False to indicate we didn't cast
 
     hero_id = get_hero_agent_id()
     if hero_id == 0:
-        return
+        return False
 
     if not GLOBAL_CACHE.Agent.IsLiving(hero_id):
-        return
+        return False
 
     try:
-        hero_energy = GLOBAL_CACHE.Agent.GetEnergy(hero_id)
-        if hero_energy is not None and hero_energy < 0.5:
+        hero_energy = get_hero_energy_points(hero_id)
+        # Cast Blessed Signet when energy drops below 20
+        if hero_energy < 20:
             # HeroUseSkill uses 1-indexed hero numbers (1-7)
             hero_number = hero_index + 1
             # Blessed Signet targets self (hero's own ID)
@@ -213,10 +234,12 @@ def use_blessed_signet():
             # Blessed Signet is instant cast (0.25s activation) but add buffer
             next_cast_time = current_time + 500  # Small delay for signet
 
-            Py4GW.Console.Log("Life Bonder", f"Using Blessed Signet (energy: {int(hero_energy * 100)}%)", Py4GW.Console.MessageType.Info)
+            Py4GW.Console.Log("Life Bonder", f"Using Blessed Signet (energy: {hero_energy})", Py4GW.Console.MessageType.Info)
             signet_timer.Reset()
+            return True  # Return True to indicate we cast
     except:
         pass
+    return False
 
 
 def load_template():
@@ -236,8 +259,11 @@ def run_bot():
     """Main bot logic - called when bot is started."""
     try:
         update_hero_flag()
-        maintain_bonds()
-        use_blessed_signet()
+
+        # Prioritize energy management - cast Blessed Signet first if needed
+        # Only try to maintain bonds if we're not recovering energy
+        if not use_blessed_signet():
+            maintain_bonds()
     except Exception as e:
         Py4GW.Console.Log("Life Bonder", f"Error in run_bot: {str(e)}", Py4GW.Console.MessageType.Error)
 
@@ -335,15 +361,14 @@ def draw_ui():
                 if hero_name:
                     PyImGui.text(f"Active Hero: {hero_name}")
 
-                hero_energy = GLOBAL_CACHE.Agent.GetEnergy(hero_id)
-                if hero_energy is not None:
-                    energy_pct = int(hero_energy * 100)
-                    if energy_pct < 30:
-                        PyImGui.text_colored(f"Hero Energy: {energy_pct}%", RED)
-                    elif energy_pct < 60:
-                        PyImGui.text_colored(f"Hero Energy: {energy_pct}%", YELLOW)
-                    else:
-                        PyImGui.text_colored(f"Hero Energy: {energy_pct}%", GREEN)
+                hero_energy = get_hero_energy_points(hero_id)
+                max_energy = GLOBAL_CACHE.Agent.GetMaxEnergy(hero_id) or 0
+                if hero_energy < 20:
+                    PyImGui.text_colored(f"Hero Energy: {hero_energy}/{max_energy} (LOW!)", RED)
+                elif hero_energy < 30:
+                    PyImGui.text_colored(f"Hero Energy: {hero_energy}/{max_energy}", YELLOW)
+                else:
+                    PyImGui.text_colored(f"Hero Energy: {hero_energy}/{max_energy}", GREEN)
 
                 if GLOBAL_CACHE.Agent.IsLiving(hero_id):
                     PyImGui.text_colored("Hero Status: Alive", GREEN)
