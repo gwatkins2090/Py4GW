@@ -171,7 +171,7 @@ def maintain_bonds():
             skill_slot = bond["slot"]
 
             # Cast the bond on the player
-            SkillBar.HeroUseSkill(player_id, skill_slot, hero_number)
+            GLOBAL_CACHE.SkillBar.HeroUseSkill(player_id, skill_slot, hero_number)
 
             # Set the next cast time based on this skill's cast time + buffer
             cast_time = bond.get("cast_time", 2000)
@@ -208,7 +208,7 @@ def use_blessed_signet():
             # HeroUseSkill uses 1-indexed hero numbers (1-7)
             hero_number = hero_index + 1
             # Blessed Signet targets self (hero's own ID)
-            SkillBar.HeroUseSkill(hero_id, BLESSED_SIGNET_SLOT, hero_number)
+            GLOBAL_CACHE.SkillBar.HeroUseSkill(hero_id, BLESSED_SIGNET_SLOT, hero_number)
 
             # Blessed Signet is instant cast (0.25s activation) but add buffer
             next_cast_time = current_time + 500  # Small delay for signet
@@ -225,7 +225,7 @@ def load_template():
     try:
         # LoadHeroSkillTemplate uses 1-indexed hero numbers (1-7)
         hero_number = hero_index + 1
-        SkillBar.LoadHeroSkillTemplate(hero_number, BONDER_TEMPLATE)
+        GLOBAL_CACHE.SkillBar.LoadHeroSkillTemplate(hero_number, BONDER_TEMPLATE)
         template_loaded = True
         Py4GW.Console.Log("Life Bonder", f"Template loaded on Hero {hero_number}", Py4GW.Console.MessageType.Info)
     except Exception as e:
@@ -234,9 +234,12 @@ def load_template():
 
 def run_bot():
     """Main bot logic - called when bot is started."""
-    update_hero_flag()
-    maintain_bonds()
-    use_blessed_signet()
+    try:
+        update_hero_flag()
+        maintain_bonds()
+        use_blessed_signet()
+    except Exception as e:
+        Py4GW.Console.Log("Life Bonder", f"Error in run_bot: {str(e)}", Py4GW.Console.MessageType.Error)
 
 
 def draw_ui():
