@@ -1,4 +1,5 @@
 import traceback
+import math
 import Py4GW
 
 from Py4GWCoreLib import IniHandler, Timer, ThrottledTimer
@@ -10,6 +11,7 @@ from Py4GWCoreLib import Routines
 from Py4GWCoreLib import Keystroke
 from Py4GWCoreLib import Key
 from Py4GWCoreLib import ActionQueueManager
+from Py4GWCoreLib import Effects
 
 import os
 
@@ -78,6 +80,32 @@ class Global_Vars:
         self.party_players = []
         self.plarty_leader_id = 0
 
+        # Life Bonder Configuration
+        self.life_bonder_enabled = False
+        self.life_bonder_distance = 350.0       # Distance behind player to flag bonder
+        self.life_bonder_hero_index = 0         # First hero (party position 0)
+        self.life_bonder_template = "OwAS8YIPpE5B9Ie4QCJX/DC"
+        self.life_bonder_template_loaded = False
+
+        # Bond skill names and their slot positions in the template
+        # Template: OwAS8YIPpE5B9Ie4QCJX/DC
+        # Slots: 1-Balthazar's Spirit, 2-Life Attunement, 3-Life Bond, 4-Life Barrier,
+        #        5-Vital Blessing, 6-Purifying Veil, 7-Protective Bond, 8-Blessed Signet
+        self.bond_skills = [
+            {"name": "Balthazars_Spirit", "slot": 1, "enabled": True},
+            {"name": "Life_Attunement", "slot": 2, "enabled": True},
+            {"name": "Life_Bond", "slot": 3, "enabled": True},
+            {"name": "Life_Barrier", "slot": 4, "enabled": True},
+            {"name": "Vital_Blessing", "slot": 5, "enabled": True},
+            {"name": "Purifying_Veil", "slot": 6, "enabled": True},
+            {"name": "Protective_Bond", "slot": 7, "enabled": True},
+        ]
+        self.blessed_signet_slot = 8            # Slot for energy management
+        self.bond_cast_timer = ThrottledTimer(1500)  # Delay between bond casts
+        self.flag_update_timer = ThrottledTimer(1000)  # Delay between flag updates
+        self.blessed_signet_timer = ThrottledTimer(3000)  # Delay for blessed signet
+        self.last_bonder_position = (0.0, 0.0)
+
     def reset_vars(self):
         if self.low_life:
             self.low_life = False
@@ -87,11 +115,18 @@ class Global_Vars:
             self.players_max_health_table = {}
         if self.log_low_health == False:
             self.log_low_health = True
-            
+
         self.game_timer.Reset()
         self.outpost_timer.Reset()
         self.cache_timer.Reset()
         self.party_names = {}
+
+        # Reset life bonder state
+        self.life_bonder_template_loaded = False
+        self.bond_cast_timer.Reset()
+        self.flag_update_timer.Reset()
+        self.blessed_signet_timer.Reset()
+        self.last_bonder_position = (0.0, 0.0)
             
     def update_cache(self):
         if self.cache_timer.IsExpired():
@@ -176,6 +211,194 @@ def acceptparty():
             GLOBAL_CACHE.Party.Players.InvitePlayer(party_leader_name)
             global_vars.reform_party = False
 
+# ============== LIFE BONDER FUNCTIONS ==============
+
+def get_life_bonder_hero_agent_id():
+    """Get the agent ID of the life bonder hero (first hero in party)."""
+    global global_vars
+    try:
+        heroes = GLOBAL_CACHE.Party.GetHeroes()
+        if len(heroes) > global_vars.life_bonder_hero_index:
+            return GLOBAL_CACHE.Party.Heroes.GetHeroAgentIDByPartyPosition(global_vars.life_bonder_hero_index)
+    except:
+        pass
+    return 0
+
+def calculate_position_behind_player(distance: float):
+    """Calculate a position behind the player based on their facing direction."""
+    global global_vars
+    try:
+        player_x, player_y = GLOBAL_CACHE.Player.GetXY()
+        player_angle = GLOBAL_CACHE.Agent.GetRotationAngle(global_vars.player_agent_id)
+
+        # Calculate position behind player (opposite of facing direction)
+        behind_angle = player_angle + math.pi  # Add 180 degrees
+
+        flag_x = player_x + distance * math.cos(behind_angle)
+        flag_y = player_y + distance * math.sin(behind_angle)
+
+        return (flag_x, flag_y)
+    except:
+        return (0.0, 0.0)
+
+def update_life_bonder_flag():
+    """Update the flag position for the life bonder hero to keep them behind the group."""
+    global global_vars
+
+    if not global_vars.life_bonder_enabled:
+        return
+
+    if not global_vars.flag_update_timer.IsExpired():
+        return
+
+    hero_agent_id = get_life_bonder_hero_agent_id()
+    if hero_agent_id == 0:
+        return
+
+    # Calculate new position behind player
+    new_pos = calculate_position_behind_player(global_vars.life_bonder_distance)
+    if new_pos == (0.0, 0.0):
+        return
+
+    # Only update if position has changed significantly (more than 50 units)
+    dx = new_pos[0] - global_vars.last_bonder_position[0]
+    dy = new_pos[1] - global_vars.last_bonder_position[1]
+    distance_moved = math.sqrt(dx*dx + dy*dy)
+
+    if distance_moved > 50.0:
+        GLOBAL_CACHE.Party.Heroes.FlagHero(hero_agent_id, new_pos[0], new_pos[1])
+        global_vars.last_bonder_position = new_pos
+        global_vars.flag_update_timer.Reset()
+
+def check_bond_on_player(skill_name: str) -> bool:
+    """Check if a specific bond is active on the player."""
+    global global_vars
+    try:
+        skill_id = GLOBAL_CACHE.Skill.GetID(skill_name)
+        if skill_id == 0:
+            return True  # If skill not found, assume it's active to avoid errors
+        return Effects.HasEffect(global_vars.player_agent_id, skill_id)
+    except:
+        return True  # Assume active on error
+
+def get_next_missing_bond():
+    """Get the next bond that needs to be cast on the player."""
+    global global_vars
+    for bond in global_vars.bond_skills:
+        if bond["enabled"] and not check_bond_on_player(bond["name"]):
+            return bond
+    return None
+
+def cast_hero_skill_on_player(skill_slot: int, hero_number: int = 1):
+    """Have the life bonder hero cast a skill on the player."""
+    global global_vars
+    try:
+        player_agent_id = global_vars.player_agent_id
+        if player_agent_id == 0:
+            return False
+
+        # HeroUseSkill(target_agent_id, skill_number, hero_number)
+        # hero_number is 1-indexed (1 = first hero)
+        GLOBAL_CACHE.SkillBar.HeroUseSkill(player_agent_id, skill_slot, hero_number)
+        return True
+    except Exception as e:
+        Py4GW.Console.Log(module_name, f"Error casting hero skill: {str(e)}", Py4GW.Console.MessageType.Error)
+        return False
+
+def maintain_bonds():
+    """Check and recast bonds that have expired."""
+    global global_vars
+
+    if not global_vars.life_bonder_enabled:
+        return
+
+    if not global_vars.bond_cast_timer.IsExpired():
+        return
+
+    # Get the hero agent ID
+    hero_agent_id = get_life_bonder_hero_agent_id()
+    if hero_agent_id == 0:
+        return
+
+    # Check if hero is alive
+    if not GLOBAL_CACHE.Agent.IsLiving(hero_agent_id):
+        return
+
+    # Find the next missing bond
+    missing_bond = get_next_missing_bond()
+    if missing_bond is not None:
+        # Cast the missing bond
+        hero_number = global_vars.life_bonder_hero_index + 1  # Convert to 1-indexed
+        if cast_hero_skill_on_player(missing_bond["slot"], hero_number):
+            Py4GW.Console.Log(module_name, f"Casting {missing_bond['name']} on player", Py4GW.Console.MessageType.Info)
+            global_vars.bond_cast_timer.Reset()
+        return
+
+def use_blessed_signet():
+    """Use Blessed Signet for energy management when hero energy is low."""
+    global global_vars
+
+    if not global_vars.life_bonder_enabled:
+        return
+
+    if not global_vars.blessed_signet_timer.IsExpired():
+        return
+
+    hero_agent_id = get_life_bonder_hero_agent_id()
+    if hero_agent_id == 0:
+        return
+
+    # Check if hero is alive
+    if not GLOBAL_CACHE.Agent.IsLiving(hero_agent_id):
+        return
+
+    # Check hero energy (cast Blessed Signet when below 50% energy)
+    try:
+        hero_energy = GLOBAL_CACHE.Agent.GetEnergy(hero_agent_id)
+        if hero_energy is not None and hero_energy < 0.5:
+            hero_number = global_vars.life_bonder_hero_index + 1
+            # Blessed Signet is self-targeted (target_agent_id = 0 or hero's own ID)
+            GLOBAL_CACHE.SkillBar.HeroUseSkill(hero_agent_id, global_vars.blessed_signet_slot, hero_number)
+            global_vars.blessed_signet_timer.Reset()
+    except:
+        pass
+
+def load_life_bonder_template():
+    """Load the life bonder skill template on the hero."""
+    global global_vars
+
+    if global_vars.life_bonder_template_loaded:
+        return
+
+    if not global_vars.life_bonder_enabled:
+        return
+
+    try:
+        hero_index = global_vars.life_bonder_hero_index
+        GLOBAL_CACHE.SkillBar.LoadHeroSkillTemplate(hero_index, global_vars.life_bonder_template)
+        global_vars.life_bonder_template_loaded = True
+        Py4GW.Console.Log(module_name, f"Loaded life bonder template on hero {hero_index + 1}", Py4GW.Console.MessageType.Info)
+    except Exception as e:
+        Py4GW.Console.Log(module_name, f"Error loading template: {str(e)}", Py4GW.Console.MessageType.Error)
+
+def run_life_bonder():
+    """Main function to run life bonder functionality."""
+    global global_vars
+
+    if not global_vars.life_bonder_enabled:
+        return
+
+    # Update hero flag position
+    update_life_bonder_flag()
+
+    # Maintain bonds on player
+    maintain_bonds()
+
+    # Use Blessed Signet for energy
+    use_blessed_signet()
+
+# ============== END LIFE BONDER FUNCTIONS ==============
+
 class Config:
     global ini_handler, module_name, sync_timer, sync_interval, global_vars
     def __init__(self):
@@ -187,11 +410,31 @@ class Config:
         if global_vars.lvl11_20_threshold != self.lvl11_20:
             global_vars.lvl11_20_threshold = self.lvl11_20
 
+        # Life Bonder configuration
+        self.life_bonder_enabled = ini_handler.read_bool(module_name, "life_bonder_enabled", False)
+        global_vars.life_bonder_enabled = self.life_bonder_enabled
+        self.life_bonder_distance = ini_handler.read_float(module_name, "life_bonder_distance", 350.0)
+        global_vars.life_bonder_distance = self.life_bonder_distance
+
+        # Load bond enabled states
+        for i, bond in enumerate(global_vars.bond_skills):
+            enabled = ini_handler.read_bool(module_name, f"bond_{i}_enabled", True)
+            global_vars.bond_skills[i]["enabled"] = enabled
+
     def save(self):
         """Save the current configuration to the INI file."""
         if sync_timer.HasElapsed(sync_interval):
             ini_handler.write_key(module_name, "lvl1_10", str(self.lvl1_10))
             ini_handler.write_key(module_name, "lvl11_20", str(self.lvl11_20))
+
+            # Save life bonder settings
+            ini_handler.write_key(module_name, "life_bonder_enabled", str(self.life_bonder_enabled))
+            ini_handler.write_key(module_name, "life_bonder_distance", str(self.life_bonder_distance))
+
+            # Save bond enabled states
+            for i, bond in enumerate(global_vars.bond_skills):
+                ini_handler.write_key(module_name, f"bond_{i}_enabled", str(bond["enabled"]))
+
             sync_timer.Start()
 
 widget_config = Config()
@@ -262,6 +505,69 @@ def configure():
             if global_vars.lvl11_20_threshold != widget_config.lvl11_20:
                 global_vars.lvl11_20_threshold = widget_config.lvl11_20
 
+            # ============== LIFE BONDER UI ==============
+            PyImGui.separator()
+            PyImGui.text_colored("Life Bonder Hero", (0.4, 0.8, 1.0, 1.0))
+
+            # Enable/Disable checkbox
+            widget_config.life_bonder_enabled = PyImGui.checkbox("Enable Life Bonder", widget_config.life_bonder_enabled)
+            if global_vars.life_bonder_enabled != widget_config.life_bonder_enabled:
+                global_vars.life_bonder_enabled = widget_config.life_bonder_enabled
+                if widget_config.life_bonder_enabled:
+                    global_vars.life_bonder_template_loaded = False  # Reset to reload template
+
+            if widget_config.life_bonder_enabled:
+                PyImGui.text_wrapped("Hero 1 will maintain bonds on you")
+                PyImGui.text_wrapped("and stay behind to avoid aggro.")
+
+                # Distance slider
+                widget_config.life_bonder_distance = PyImGui.slider_float("Distance Behind##bonder", widget_config.life_bonder_distance, 200.0, 600.0)
+                if global_vars.life_bonder_distance != widget_config.life_bonder_distance:
+                    global_vars.life_bonder_distance = widget_config.life_bonder_distance
+
+                # Load Template button
+                if PyImGui.button("Load Bonder Template##loadtemplate"):
+                    global_vars.life_bonder_template_loaded = False
+                    load_life_bonder_template()
+
+                # Show bond status
+                PyImGui.separator()
+                PyImGui.text("Bond Status:")
+                for i, bond in enumerate(global_vars.bond_skills):
+                    # Get friendly name (replace underscores with spaces)
+                    friendly_name = bond["name"].replace("_", " ").replace("Balthazars", "Balthazar's")
+
+                    # Check if bond is active
+                    is_active = check_bond_on_player(bond["name"])
+
+                    # Checkbox for enabling/disabling this bond
+                    bond["enabled"] = PyImGui.checkbox(f"##{bond['name']}", bond["enabled"])
+                    PyImGui.same_line(0, 5)
+
+                    # Show status colored text
+                    if is_active:
+                        PyImGui.text_colored(f"{friendly_name}", (0.0, 1.0, 0.0, 1.0))  # Green
+                    else:
+                        PyImGui.text_colored(f"{friendly_name}", (1.0, 0.3, 0.3, 1.0))  # Red
+
+                # Show hero energy if available
+                hero_agent_id = get_life_bonder_hero_agent_id()
+                if hero_agent_id != 0:
+                    try:
+                        hero_energy = GLOBAL_CACHE.Agent.GetEnergy(hero_agent_id)
+                        if hero_energy is not None:
+                            energy_pct = int(hero_energy * 100)
+                            if energy_pct < 30:
+                                PyImGui.text_colored(f"Hero Energy: {energy_pct}%", (1.0, 0.3, 0.3, 1.0))
+                            elif energy_pct < 60:
+                                PyImGui.text_colored(f"Hero Energy: {energy_pct}%", (1.0, 1.0, 0.0, 1.0))
+                            else:
+                                PyImGui.text_colored(f"Hero Energy: {energy_pct}%", (0.0, 1.0, 0.0, 1.0))
+                    except:
+                        pass
+
+            # ============== END LIFE BONDER UI ==============
+
             widget_config.save()
             end_pos = PyImGui.get_window_pos()
 
@@ -310,12 +616,17 @@ def main():
         if GLOBAL_CACHE.Map.IsOutpost():
             if not global_vars.outpost_timer.IsExpired():
                 return
-            
+
             global_vars.outpost_timer.Reset()
             map_id = GLOBAL_CACHE.Map.GetMapID()
             if global_vars.last_outpost != map_id:
                 global_vars.last_outpost = map_id
                 #Py4GW.Console.Log(module_name, f"Last Outpost: {Map.GetMapName(global_vars.last_outpost)}({Map.GetMapID()})", Py4GW.Console.MessageType.Info)
+
+            # Load life bonder template in outpost
+            if global_vars.life_bonder_enabled:
+                load_life_bonder_template()
+
             #reform party
             if global_vars.reform_party:
                 if global_vars.is_party_leader:
@@ -324,7 +635,10 @@ def main():
                     acceptparty()
             return
 
-        elif GLOBAL_CACHE.Map.IsExplorable():  
+        elif GLOBAL_CACHE.Map.IsExplorable():
+            # Run life bonder (flagging + bond maintenance)
+            run_life_bonder()
+
             update_max_health()
             update_party_names()
             if global_vars.low_life:
