@@ -143,13 +143,21 @@ def maintain_bonds():
     if not GLOBAL_CACHE.Agent.IsLiving(hero_id):
         return
 
+    # Get player (target for bonds)
+    player_id = GLOBAL_CACHE.Player.GetAgentID()
+    if player_id == 0:
+        return
+
     # Find the next missing bond
     missing_bond = get_next_missing_bond()
     if missing_bond is not None:
-        player_id = GLOBAL_CACHE.Player.GetAgentID()
-        hero_number = hero_index + 1  # Convert to 1-indexed for HeroUseSkill
-        GLOBAL_CACHE.SkillBar.HeroUseSkill(player_id, missing_bond["slot"], hero_number)
-        Py4GW.Console.Log("Life Bonder", f"Casting {missing_bond['display']}", Py4GW.Console.MessageType.Info)
+        # HeroUseSkill uses 1-indexed hero numbers (1-7)
+        hero_number = hero_index + 1
+        skill_slot = missing_bond["slot"]
+
+        # Cast the bond on the player
+        SkillBar.HeroUseSkill(player_id, skill_slot, hero_number)
+        Py4GW.Console.Log("Life Bonder", f"Casting {missing_bond['display']} (slot {skill_slot}) on player", Py4GW.Console.MessageType.Info)
         bond_timer.Reset()
 
 
@@ -170,8 +178,11 @@ def use_blessed_signet():
     try:
         hero_energy = GLOBAL_CACHE.Agent.GetEnergy(hero_id)
         if hero_energy is not None and hero_energy < 0.5:
+            # HeroUseSkill uses 1-indexed hero numbers (1-7)
             hero_number = hero_index + 1
-            GLOBAL_CACHE.SkillBar.HeroUseSkill(hero_id, BLESSED_SIGNET_SLOT, hero_number)
+            # Blessed Signet targets self (hero's own ID)
+            SkillBar.HeroUseSkill(hero_id, BLESSED_SIGNET_SLOT, hero_number)
+            Py4GW.Console.Log("Life Bonder", f"Using Blessed Signet (energy: {int(hero_energy * 100)}%)", Py4GW.Console.MessageType.Info)
             signet_timer.Reset()
     except:
         pass
@@ -181,9 +192,11 @@ def load_template():
     """Load the life bonder template on the hero."""
     global template_loaded, hero_index
     try:
-        GLOBAL_CACHE.SkillBar.LoadHeroSkillTemplate(hero_index, BONDER_TEMPLATE)
+        # LoadHeroSkillTemplate uses 1-indexed hero numbers (1-7)
+        hero_number = hero_index + 1
+        SkillBar.LoadHeroSkillTemplate(hero_number, BONDER_TEMPLATE)
         template_loaded = True
-        Py4GW.Console.Log("Life Bonder", f"Template loaded on Hero {hero_index + 1}", Py4GW.Console.MessageType.Info)
+        Py4GW.Console.Log("Life Bonder", f"Template loaded on Hero {hero_number}", Py4GW.Console.MessageType.Info)
     except Exception as e:
         Py4GW.Console.Log("Life Bonder", f"Error loading template: {str(e)}", Py4GW.Console.MessageType.Error)
 
