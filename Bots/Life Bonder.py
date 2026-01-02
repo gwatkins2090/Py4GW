@@ -5,6 +5,7 @@ Automatically maintains bonds on the player using a hero life bonder.
 
 from Py4GWCoreLib import *
 import math
+import time
 
 # Bot state
 bot_started = False
@@ -138,7 +139,7 @@ def maintain_bonds():
     global bond_timer, hero_index, current_bond_index, bond_skills, next_cast_time
 
     # Check if we're still waiting for the previous cast to finish
-    current_time = Py4GW.GetTickCount()
+    current_time = int(time.time() * 1000)
     if current_time < next_cast_time:
         return
 
@@ -190,7 +191,7 @@ def use_blessed_signet():
         return
 
     # Check if we're still waiting for a cast to finish
-    current_time = Py4GW.GetTickCount()
+    current_time = int(time.time() * 1000)
     if current_time < next_cast_time:
         return
 
