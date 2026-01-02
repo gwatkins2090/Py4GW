@@ -13,28 +13,32 @@ hero_index = 0  # First hero (0-indexed)
 flag_distance = 350.0
 last_flag_position = (0.0, 0.0)
 current_bond_index = 0  # Track which bond to cast next
+next_cast_time = 0  # Time when next cast is allowed (ms since bot started)
 
 # Skill template: OwAS8YIPpE5B9Ie4QCJX/DC
 # Slots: 1-Balthazar's Spirit, 2-Life Attunement, 3-Life Bond, 4-Life Barrier,
 #        5-Vital Blessing, 6-Purifying Veil, 7-Protective Bond, 8-Blessed Signet
 BONDER_TEMPLATE = "OwAS8YIPpE5B9Ie4QCJX/DC"
 
-# Bond configuration
+# Bond configuration - includes cast time in ms
+# Cast times: Balthazar's Spirit=2s, Life Attunement=2s, Life Bond=2s,
+#             Life Barrier=2s, Vital Blessing=1s, Purifying Veil=1s, Protective Bond=2s
 bond_skills = [
-    {"name": "Balthazars_Spirit", "slot": 1, "enabled": True, "display": "Balthazar's Spirit"},
-    {"name": "Life_Attunement", "slot": 2, "enabled": True, "display": "Life Attunement"},
-    {"name": "Life_Bond", "slot": 3, "enabled": True, "display": "Life Bond"},
-    {"name": "Life_Barrier", "slot": 4, "enabled": True, "display": "Life Barrier"},
-    {"name": "Vital_Blessing", "slot": 5, "enabled": True, "display": "Vital Blessing"},
-    {"name": "Purifying_Veil", "slot": 6, "enabled": True, "display": "Purifying Veil"},
-    {"name": "Protective_Bond", "slot": 7, "enabled": True, "display": "Protective Bond"},
+    {"name": "Balthazars_Spirit", "slot": 1, "enabled": True, "display": "Balthazar's Spirit", "cast_time": 2000},
+    {"name": "Life_Attunement", "slot": 2, "enabled": True, "display": "Life Attunement", "cast_time": 2000},
+    {"name": "Life_Bond", "slot": 3, "enabled": True, "display": "Life Bond", "cast_time": 2000},
+    {"name": "Life_Barrier", "slot": 4, "enabled": True, "display": "Life Barrier", "cast_time": 2000},
+    {"name": "Vital_Blessing", "slot": 5, "enabled": True, "display": "Vital Blessing", "cast_time": 1000},
+    {"name": "Purifying_Veil", "slot": 6, "enabled": True, "display": "Purifying Veil", "cast_time": 1000},
+    {"name": "Protective_Bond", "slot": 7, "enabled": True, "display": "Protective Bond", "cast_time": 2000},
 ]
 BLESSED_SIGNET_SLOT = 8
 
 # Timers
 bond_timer = Timer()
 bond_timer.Start()
-BOND_CAST_DELAY = 1500  # ms between bond casts
+BOND_CAST_DELAY = 500  # Base delay - will add cast time after each cast
+AFTERCAST_BUFFER = 1000  # Buffer for aftercast + ping (1 second)
 
 flag_timer = Timer()
 flag_timer.Start()
@@ -131,9 +135,11 @@ def update_hero_flag():
 
 def maintain_bonds():
     """Cycle through bonds and cast them on the player."""
-    global bond_timer, hero_index, current_bond_index, bond_skills
+    global bond_timer, hero_index, current_bond_index, bond_skills, next_cast_time
 
-    if not bond_timer.HasElapsed(BOND_CAST_DELAY):
+    # Check if we're still waiting for the previous cast to finish
+    current_time = Py4GW.GetTickCount()
+    if current_time < next_cast_time:
         return
 
     hero_id = get_hero_agent_id()
@@ -165,8 +171,12 @@ def maintain_bonds():
 
             # Cast the bond on the player
             SkillBar.HeroUseSkill(player_id, skill_slot, hero_number)
-            Py4GW.Console.Log("Life Bonder", f"Casting {bond['display']} (slot {skill_slot}) on player {player_id}", Py4GW.Console.MessageType.Info)
-            bond_timer.Reset()
+
+            # Set the next cast time based on this skill's cast time + buffer
+            cast_time = bond.get("cast_time", 2000)
+            next_cast_time = current_time + cast_time + AFTERCAST_BUFFER
+
+            Py4GW.Console.Log("Life Bonder", f"Casting {bond['display']} (slot {skill_slot}) - waiting {cast_time + AFTERCAST_BUFFER}ms", Py4GW.Console.MessageType.Info)
             return
 
         attempts += 1
@@ -174,9 +184,14 @@ def maintain_bonds():
 
 def use_blessed_signet():
     """Use Blessed Signet for energy management."""
-    global signet_timer, hero_index
+    global signet_timer, hero_index, next_cast_time
 
     if not signet_timer.HasElapsed(SIGNET_DELAY):
+        return
+
+    # Check if we're still waiting for a cast to finish
+    current_time = Py4GW.GetTickCount()
+    if current_time < next_cast_time:
         return
 
     hero_id = get_hero_agent_id()
@@ -193,6 +208,10 @@ def use_blessed_signet():
             hero_number = hero_index + 1
             # Blessed Signet targets self (hero's own ID)
             SkillBar.HeroUseSkill(hero_id, BLESSED_SIGNET_SLOT, hero_number)
+
+            # Blessed Signet is instant cast (0.25s activation) but add buffer
+            next_cast_time = current_time + 500  # Small delay for signet
+
             Py4GW.Console.Log("Life Bonder", f"Using Blessed Signet (energy: {int(hero_energy * 100)}%)", Py4GW.Console.MessageType.Info)
             signet_timer.Reset()
     except:
