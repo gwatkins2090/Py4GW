@@ -12,6 +12,7 @@ template_loaded = False
 hero_index = 0  # First hero (0-indexed)
 flag_distance = 350.0
 last_flag_position = (0.0, 0.0)
+current_bond_index = 0  # Track which bond to cast next
 
 # Skill template: OwAS8YIPpE5B9Ie4QCJX/DC
 # Slots: 1-Balthazar's Spirit, 2-Life Attunement, 3-Life Bond, 4-Life Barrier,
@@ -129,14 +130,15 @@ def update_hero_flag():
 
 
 def maintain_bonds():
-    """Check and recast bonds that have expired."""
-    global bond_timer, hero_index
+    """Cycle through bonds and cast them on the player."""
+    global bond_timer, hero_index, current_bond_index, bond_skills
 
     if not bond_timer.HasElapsed(BOND_CAST_DELAY):
         return
 
     hero_id = get_hero_agent_id()
     if hero_id == 0:
+        Py4GW.Console.Log("Life Bonder", "No hero found", Py4GW.Console.MessageType.Warning)
         return
 
     # Check if hero is alive
@@ -148,17 +150,26 @@ def maintain_bonds():
     if player_id == 0:
         return
 
-    # Find the next missing bond
-    missing_bond = get_next_missing_bond()
-    if missing_bond is not None:
-        # HeroUseSkill uses 1-indexed hero numbers (1-7)
-        hero_number = hero_index + 1
-        skill_slot = missing_bond["slot"]
+    # Find the next enabled bond to cast
+    attempts = 0
+    while attempts < len(bond_skills):
+        bond = bond_skills[current_bond_index]
 
-        # Cast the bond on the player
-        SkillBar.HeroUseSkill(player_id, skill_slot, hero_number)
-        Py4GW.Console.Log("Life Bonder", f"Casting {missing_bond['display']} (slot {skill_slot}) on player", Py4GW.Console.MessageType.Info)
-        bond_timer.Reset()
+        # Move to next bond for next iteration
+        current_bond_index = (current_bond_index + 1) % len(bond_skills)
+
+        if bond["enabled"]:
+            # HeroUseSkill uses 1-indexed hero numbers (1-7)
+            hero_number = hero_index + 1
+            skill_slot = bond["slot"]
+
+            # Cast the bond on the player
+            SkillBar.HeroUseSkill(player_id, skill_slot, hero_number)
+            Py4GW.Console.Log("Life Bonder", f"Casting {bond['display']} (slot {skill_slot}) on player {player_id}", Py4GW.Console.MessageType.Info)
+            bond_timer.Reset()
+            return
+
+        attempts += 1
 
 
 def use_blessed_signet():
